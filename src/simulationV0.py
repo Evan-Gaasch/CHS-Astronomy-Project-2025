@@ -7,10 +7,12 @@ Description: Astronomy Club Project (Mission Simulation using Poliastro)
 #Assume round initial orbit (e=0) to simplify calculations
 
 #import astropy sub-packages
+import poliastro
 from astropy import units
 from astropy.time import Time, TimeDelta
-from poliastro.bodies import Body, Earth, Mars, Jupiter, Mercury, Saturn, Venus, Uranus, Neptune #add more here if you want different objects
+from poliastro.bodies import Body, Earth, Mars, Jupiter, Mercury, Saturn, Venus, Uranus, Neptune,Sun #add more here if you want different objects
 from poliastro.twobody import Orbit
+from poliastro.iod.izzo import lambert
 from dataclasses import dataclass, field
 import poliastro.maneuver as maneuver
 import matplotlib #graphing libraries
@@ -34,47 +36,66 @@ class InitialParameters:
     
     launchWindowStartDate: Time = field(default_factory=lambda: Time("2030-01-01", scale="tdb")) #useful for finding trajectories with minimum delta v
     launchWindowEndDate: Time = field(default_factory=lambda: Time("2031-01-01", scale="tdb"))
+    tof_candidates = [50,100,200,400,500,750,1000]
     #add other parameters like rocket type here
 
-    
-#Define initial orbit:
-def createInitialOrbit(launchDate):
-    params = InitialParameters()
-    return Orbit.circular(
-        attractor=params.startingBody,
-        inc=params.launchSiteLatitude,
-        alt=params.initialOrbitAltitude,
-        epoch=launchDate
-    )
-
-def createArrivalOrbit(arrivalDate):
-    params = InitialParameters()
-    return Orbit.circular(
-        attractor=params.targetBody,
-        inc=params.targetOrbitInclination,
-        alt=params.targetOrbitAltitude,
-        epoch=arrivalDate
-    )
 
 def approximateTOF():
     #fill in this function later, now just guess some number of days
 
     # function here will use lambert solver to find minimum, upper bound of time and search through that for a solutions
     
-    return (400) 
+    return (400* units.day) #rough guess
 
-def lambertSolver(launchDate): #add more parameters here when time of flight is calculated automatically
 
-    timeOfFlight = approximateTOF()
-    arrivalDate = launchDate + TimeDelta(timeOfFlight* units.day)
+def calcDepartureBurn(v_depart, departure_trajectory, parkingAltitude, departBody):
+    
+    v_inf_depart = np.linalg.norm((v_depart - departure_trajectory.v).to(units.km / units.s).value)
+    
+    # parking orbit radius = body radius + altitude
+    r_park = (departBody.R + parkingAltitude).to(units.km).value
+    mu = departBody.k.to(units.km**3 / units.s**2).value
+    
+    # velocity in parking orbit
+    v_circ = np.sqrt(mu / r_park)
+    
+    # velocity needed at periapsis of departure hyperbola
+    v_hyp = np.sqrt(v_inf_depart**2 + 2 * mu / r_park)
+    
+    return v_hyp - v_circ  # delta-V for the burn
+
+def calcArrivalBurn(v_arrive, arrival_trajectory, parkingAltitude, arriveBody):
+    v_inf_arrive = np.linalg.norm((arrival_trajectory.v - v_arrive).to(units.km / units.s).value)
+    
+    r_park = (arriveBody.R + parkingAltitude).to(units.km).value
+    mu = arriveBody.k.to(units.km**3 / units.s**2).value
+    
+    v_circ = np.sqrt(mu / r_park)
+    v_hyp = np.sqrt(v_inf_arrive**2 + 2 * mu / r_park)
+    
+    return v_hyp - v_circ
+            
+
+def lambertSolver(launchDate,timeOfFlight): #add more parameters here when time of flight is calculated automatically
+    params = InitialParameters()
+    timeOfFlight = approximateTOF() #seconds
+    arrivalDate = launchDate + TimeDelta(timeOfFlight)
     print("Date",arrivalDate)
 
-    initialOrbit = createInitialOrbit(launchDate)
-    arrivalOrbit = createArrivalOrbit(arrivalDate)
+    #find initial positions of start and end points of transfer (interplanetary section)
+    departure_trajectory = Orbit.from_body_ephem(params.startingBody, epoch=launchDate)
+    arrival_trajectory = Orbit.from_body_ephem(params.targetBody, epoch=arrivalDate)
 
-    lambertTransfer = maneuver.Maneuver.lambert(initialOrbit,arrivalOrbit,method=lambert_izzo)
+    
 
-    cost = lamberTransfer.get_total_cost()
+    (v_depart, v_arrive), = lambert(Sun.k, departure_trajectory.r, arrival_trajectory.r, tof = timeOfFlight.to(units.s))
+
+    #calculate burn required to exit initial orbit, enter final orbit
+
+    departure_burn = calcDepartureBurn(v_depart, departure_trajectory, params.initialOrbitAltitude, params.startingBody)
+    arrival_burn = calcArrivalBurn(v_arrive, arrival_trajectory, params.targetOrbitAltitude, params.targetBody)
+
+    cost = departure_burn+arrival_burn #all delta v provided at start and end, you "coast" during lambert transfer
     print(cost)
     return cost
 
@@ -84,22 +105,42 @@ def main():
     print("main starting")
     data = {
         "startTime":[],
+       # "timeOfFlight":[],
         "deltaVcost":[],
         }
     print(type(params.launchWindowEndDate))
     launchDate = params.launchWindowStartDate
     while launchDate < params.launchWindowEndDate:
-        cost = lambertSolver(launchDate)
-        data["startTime"].append(launchDate)
-        data["deltaVcost"].append(cost)
+        for tof in params.tof_candidates:
+            mission_tof = (tof*units.day).to(units.s)
+            cost = lambertSolver(launchDate,mission_tof)
+            data["startTime"].append(launchDate.to_datetime())
+            #data["timeOfFlight"].append(tof)
+            data["deltaVcost"].append(cost)
 
         #increment time by timestep
         launchDate = launchDate + TimeDelta(25* units.day)
 
     print(data)
-    df = pandas.DataFrame(data)
+    df = pd.DataFrame(data)
     #plot final results
-    df.plot()
+    df.plot(x="startTime", y="deltaVcost",   kind = "scatter")
+    matplotlib.pyplot.show()
+
+    #plot heatmap
     return df
 
-main()    
+main()
+
+
+
+        
+        
+    
+    
+
+    
+    
+    
+
+    
